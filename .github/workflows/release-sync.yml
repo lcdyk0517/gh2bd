@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # 监控的上游仓库清单：一行一个（也支持 JSON 数组）
+  # 监控的上游仓库清单：一行一个
   UPSTREAM_REPOS: |
     PortsMaster/PortMaster-GUI
     retroGFX/UnofficialOS
@@ -25,9 +25,9 @@ env:
   TRACKER_BRANCH: release-tracker
   TRACKER_DIR: .release-tracker
 
-  # 网盘基准路径（别放 ${{ github.repository }} 之类了）
+  # 网盘基准路径（不要拼 ${{ github.repository }}）
   NETDISK_PREFIX: /lcdyk有的掌机/同步github
-  # 是否在别名目录后再加 /<tag>。你要“/同步github/仓库1”这种，就设为 false
+  # 是否在别名目录后追加 /<tag>（你要只到“仓库别名”就行，因此设为 false）
   NETDISK_APPEND_TAG: "false"
 
   # 上游仓库 → 目录别名（中文 OK）
@@ -40,13 +40,21 @@ env:
       "AmberELEC/AmberELEC-prerelease": "Amberelec仓库"
     }
 
-  # 为了避免“当前仓库”的 release tag 冲突，本地 tag 是否加前缀（repo名-原tag）
+  # 为避免“当前仓库” release tag 冲突：本地 tag 使用 repo-原tag
   NAMESPACE_RELEASE_TAGS: "true"
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space (optional)
+        run: |
+          set -eux
+          df -h
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo docker system prune -af || true
+          df -h
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, json, tempfile, shutil, pathlib, subprocess, datetime, re
+import os, json, tempfile, shutil, pathlib, subprocess, datetime, re, time
 import requests
 
 GITHUB_API = "https://api.github.com"
@@ -47,23 +47,25 @@ def upload_asset(upload_url_template, filepath):
     r.raise_for_status()
     return r.json()
 
-def download_upstream_assets(assets, dest_dir):
-    paths = []
-    for a in assets or []:
-        url = a.get("browser_download_url") or a.get("url")
-        if not url:
-            continue
-        if "api.github.com/repos" in url and "/assets/" in url:
-            resp = requests.get(url, headers={**gh_headers(), "Accept": "application/octet-stream"}, stream=True)
-        else:
-            resp = requests.get(url, headers=gh_headers(), stream=True)
-        resp.raise_for_status()
-        fn = a.get("name") or pathlib.Path(url).name
-        out = pathlib.Path(dest_dir) / fn
+def download_single_asset(asset: dict, dest_dir: str) -> str:
+    """
+    流式下载单个 release 资产到临时文件，返回文件路径
+    """
+    url = asset.get("browser_download_url") or asset.get("url")
+    if not url:
+        raise RuntimeError("资产无下载地址")
+    headers = gh_headers()
+    if "api.github.com/repos" in url and "/assets/" in url:
+        headers = {**headers, "Accept": "application/octet-stream"}
+    fn = asset.get("name") or pathlib.Path(url).name
+    out = pathlib.Path(dest_dir) / fn
+    with requests.get(url, headers=headers, stream=True) as r:
+        r.raise_for_status()
         with open(out, "wb") as f:
-            shutil.copyfileobj(resp.raw, f)
-        paths.append(str(out))
-    return paths
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+    return str(out)
 
 # ---------- Tracker (one branch, many repos) ----------
 def read_tracker_state(dir_path):
@@ -81,7 +83,6 @@ def read_tracker_state(dir_path):
 def write_tracker_state(dir_path, state, repo, tag):
     p = pathlib.Path(dir_path) / "state.json"
     p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    # commit message包含 repo 与 tag，避免冲突且可读
     actor = os.environ.get("GITHUB_ACTOR", "github-actions[bot]")
     email = os.environ.get("GIT_EMAIL", "github-actions[bot]@users.noreply.github.com")
     subprocess.run(["git", "add", "state.json"], cwd=dir_path, check=True)
@@ -92,47 +93,32 @@ def write_tracker_state(dir_path, state, repo, tag):
     )
     subprocess.run(["git", "push"], cwd=dir_path, check=True)
 
-# ---------- Baidu Netdisk ----------
+# ---------- Baidu Netdisk (login once, upload per file) ----------
 def extract_bduss(cookie: str) -> str:
     m = re.search(r"BDUSS=([^;]+)", cookie or "")
     return m.group(1) if m else ""
 
-def upload_to_baidunetdisk(local_dir, remote_dir, cookie):
+def baidu_login(cookie: str):
     bduss = extract_bduss(cookie)
     if not bduss:
-        print("未找到 BDUSS（请在 BAIDU_COOKIE 中包含 BDUSS=...;），跳过百度网盘上传。")
-        return False
-
-    remote_dir = remote_dir if remote_dir.startswith("/") else "/" + remote_dir
+        raise RuntimeError("未在 BAIDU_COOKIE 中找到 BDUSS=...;")
     subprocess.run(["BaiduPCS-Go", "logout"], check=False)
     subprocess.run(["BaiduPCS-Go", "login", f"-bduss={bduss}"], check=True)
+
+def baidu_ensure_dir(remote_dir: str):
+    remote_dir = remote_dir if remote_dir.startswith("/") else "/" + remote_dir
     subprocess.run(["BaiduPCS-Go", "mkdir", remote_dir], check=False)
 
-    local_path = pathlib.Path(local_dir)
-    uploaded_any = False
-    for p in local_path.iterdir():
-        if p.is_file():
-            cmd = ["BaiduPCS-Go", "upload", str(p), remote_dir, "-retry", "3"]
-            print("上传文件：", " ".join(cmd))
-            subprocess.run(cmd, check=True)
-            uploaded_any = True
-        elif p.is_dir():
-            remote_sub = remote_dir.rstrip("/") + "/" + p.name
-            subprocess.run(["BaiduPCS-Go", "mkdir", remote_sub], check=False)
-            cmd = ["BaiduPCS-Go", "upload", str(p), remote_sub, "-retry", "3"]
-            print("上传子目录：", " ".join(cmd))
-            subprocess.run(cmd, check=True)
-            uploaded_any = True
-    if not uploaded_any:
-        print("本地待上传目录为空。")
-    return uploaded_any
+def baidu_upload_file(local_path: str, remote_dir: str):
+    remote_dir = remote_dir if remote_dir.startswith("/") else "/" + remote_dir
+    subprocess.run(["BaiduPCS-Go", "upload", local_path, remote_dir, "-retry", "3"], check=True)
 
 # ---------- Utils ----------
 def parse_upstream_repos(s: str):
     s = (s or "").strip()
     if not s:
         return []
-    if s.startswith("["):  # JSON array
+    if s.startswith("["):
         arr = json.loads(s)
         return [x.strip() for x in arr if x and str(x).strip()]
     return [ln.strip() for ln in s.splitlines() if ln.strip() and not ln.strip().startswith("#")]
@@ -179,36 +165,71 @@ def process_one(upstream, tracker_dir, netdisk_prefix, append_tag, aliases, name
         print(f"[{upstream}] tracker 已是 {last_tag}，无更新。")
         return
 
-    # 本地 release tag：是否加仓库名前缀，避免同名 tag 冲突
+    # 本地 release 的 tag：是否加仓库名前缀，避免冲突
     local_tag = f"{repo_name_only(upstream)}-{upstream_tag}" if namespace_release_tags else upstream_tag
     local_release_name = f"[{folder_for_repo(upstream, aliases)}] {name}"
 
+    # 远端网盘目录：/前缀/<别名>[/<tag>]
+    alias_folder = folder_for_repo(upstream, aliases)
+    remote_dir = f"{netdisk_prefix.rstrip('/')}/{alias_folder}"
+    if append_tag:
+        remote_dir = f"{remote_dir}/{upstream_tag}"
+
     tmp = tempfile.mkdtemp(prefix=f"assets_{repo_name_only(upstream)}_")
     try:
-        asset_files = download_upstream_assets(rel.get("assets", []), tmp)
-        print(f"[{upstream}] 下载资产 {len(asset_files)} 个：", asset_files)
+        assets = rel.get("assets", []) or []
+        print(f"[{upstream}] 待处理资产 {len(assets)} 个")
 
-        # 在当前仓库创建/补充 release（如已存在同 tag 则跳过创建）
+        # 如需在“当前仓库”创建 release，先创建拿到 upload_url
+        created = None
+        upload_url = None
         if not release_exists(current_repo, local_tag):
             created = create_release(current_repo, local_tag, local_release_name, body, draft, prerelease)
             print(f"[{upstream}] 已创建本仓库 release:", created.get("html_url"))
-            for fpath in asset_files:
-                print(f"[{upstream}] 上传资产到当前仓库:", fpath)
-                upload_asset(created["upload_url"], fpath)
+            upload_url = created["upload_url"]
         else:
             print(f"[{upstream}] 本仓库已存在 tag={local_tag} 的 release，跳过创建。")
 
-        # 计算网盘目录：/前缀/<别名>[/<tag>]
-        alias_folder = folder_for_repo(upstream, aliases)
-        remote_dir = f"{netdisk_prefix.rstrip('/')}/{alias_folder}"
-        if append_tag:
-            remote_dir = f"{remote_dir}/{upstream_tag}"
+        # 百度网盘：登录 + 确保目录
+        cookie = os.environ.get("BAIDU_COOKIE") or ""
+        try:
+            baidu_login(cookie)
+            baidu_ensure_dir(remote_dir)
+            can_upload_baidu = True
+        except Exception as e:
+            print(f"[{upstream}] 百度网盘不可用：{e}")
+            can_upload_baidu = False
 
-        ok = upload_to_baidunetdisk(tmp, remote_dir, os.environ.get("BAIDU_COOKIE") or "")
-        if ok:
-            print(f"[{upstream}] 百度网盘上传完成：{remote_dir}")
+        # 逐个资产：下载 ->（可选）传 GitHub release -> 传百度网盘 -> 删除
+        for idx, a in enumerate(assets, 1):
+            print(f"[{upstream}] 处理资产 {idx}/{len(assets)}：{a.get('name')}")
+            try:
+                fpath = download_single_asset(a, tmp)
+            except OSError as oe:
+                print(f"[{upstream}] 下载失败（可能磁盘不足）：{oe}")
+                raise
+            except Exception as e:
+                print(f"[{upstream}] 下载失败：{e}")
+                continue
 
-        # 更新 tracker：按“上游原始 tag”记账（不会与其他仓冲突）
+            if upload_url:
+                try:
+                    upload_asset(upload_url, fpath)
+                except Exception as e:
+                    print(f"[{upstream}] 上传到本仓库失败：{e}")
+
+            if can_upload_baidu:
+                try:
+                    baidu_upload_file(fpath, remote_dir)
+                except Exception as e:
+                    print(f"[{upstream}] 上传到百度网盘失败：{e}")
+
+            try:
+                os.remove(fpath)
+            except Exception as e:
+                print(f"[{upstream}] 清理本地文件失败：{e}")
+
+        # 无论是否有资产，都根据 tag 更新 tracker
         state["repos"][upstream] = {"last_tag": upstream_tag, "checked_at": now_utc_iso()}
         write_tracker_state(tracker_dir, state, upstream, upstream_tag)
         print(f"[{upstream}] tracker 已更新。")
@@ -228,7 +249,8 @@ def main():
     aliases = load_repo_aliases()
     namespace_release_tags = (os.environ.get("NAMESPACE_RELEASE_TAGS", "true").lower() == "true")
 
-    for up in upstreams:  # 顺序处理，避免并发踩 tracker
+    # 顺序处理（不并行）
+    for up in upstreams:
         print("=" * 20, up, "=" * 20)
         try:
             process_one(up, tracker_dir, netdisk_prefix, append_tag, aliases, namespace_release_tags)
