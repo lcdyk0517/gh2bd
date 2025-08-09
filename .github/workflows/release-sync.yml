@@ -1,0 +1,117 @@
+name: Sync multiple upstream releases → mirror here → upload to Baidu Netdisk
+
+on:
+  schedule:
+    - cron: "0 4 * * *"  # 每天 04:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-sync
+  cancel-in-progress: false
+
+env:
+  # 监控的上游仓库清单：一行一个
+  UPSTREAM_REPOS: |
+    PortsMaster/PortMaster-GUI
+    retroGFX/UnofficialOS
+    ROCKNIX/distribution
+    knulli-cfw/distribution
+    AmberELEC/AmberELEC-prerelease
+
+  # 记录状态的分支/目录（只存 state.json）
+  TRACKER_BRANCH: release-tracker
+  TRACKER_DIR: .release-tracker
+
+  # 网盘基准路径（不要拼 ${{ github.repository }}）
+  NETDISK_PREFIX: /lcdyk有的掌机/同步github
+  # 是否在别名目录后追加 /<tag>（你要只到“仓库别名”就行，因此设为 false）
+  NETDISK_APPEND_TAG: "false"
+
+  # 上游仓库 → 目录别名（中文 OK）
+  REPO_ALIASES: |
+    {
+      "PortsMaster/PortMaster-GUI": "PortsMaster仓库",
+      "retroGFX/UnofficialOS": "UOS仓库",
+      "ROCKNIX/distribution": "Rocknix仓库",
+      "knulli-cfw/distribution": "Knulli仓库",
+      "AmberELEC/AmberELEC-prerelease": "Amberelec仓库"
+    }
+
+  # 为避免“当前仓库” release tag 冲突：本地 tag 使用 repo-原tag
+  NAMESPACE_RELEASE_TAGS: "true"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space (optional)
+        run: |
+          set -eux
+          df -h
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo docker system prune -af || true
+          df -h
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}   # 用你的 PAT，便于推送 tracker 分支
+
+      - name: Prepare tracker worktree
+        run: |
+          set -eux
+          git fetch origin || true
+          if git ls-remote --exit-code --heads origin "$TRACKER_BRANCH" >/dev/null 2>&1; then
+            git branch -f "$TRACKER_BRANCH" "origin/$TRACKER_BRANCH"
+            git worktree add "$TRACKER_DIR" "$TRACKER_BRANCH"
+          else
+            git worktree add -b "$TRACKER_BRANCH" "$TRACKER_DIR"
+            echo '{"repos":{}}' > "$TRACKER_DIR/state.json"
+            pushd "$TRACKER_DIR"
+            git add state.json
+            git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" commit -m "init tracker"
+            git push -u origin "$TRACKER_BRANCH"
+            popd
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+
+      - name: Install BaiduPCS-Go
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y jq unzip golang-go
+          API="https://api.github.com/repos/qjfoidnh/BaiduPCS-Go/releases/latest"
+          URL=$(curl -s "$API" | jq -r '.assets[] | select(.name|test("linux.*amd64|linux.*x86_64|linux_amd64")) | .browser_download_url' | head -n1 || true)
+          if [ -n "$URL" ]; then
+            curl -L "$URL" -o /tmp/pcs.zip
+            unzip -j /tmp/pcs.zip -d /tmp || true
+            PCS=$(find /tmp -maxdepth 2 -type f -name BaiduPCS-Go | head -n1)
+            sudo mv "$PCS" /usr/local/bin/BaiduPCS-Go
+          else
+            GOPATH="$HOME/go"
+            mkdir -p "$GOPATH"
+            go install github.com/qjfoidnh/BaiduPCS-Go@latest
+            sudo ln -sf "$HOME/go/bin/BaiduPCS-Go" /usr/local/bin/BaiduPCS-Go
+          fi
+          sudo chmod +x /usr/local/bin/BaiduPCS-Go
+          BaiduPCS-Go -v
+
+      - name: Sync all upstreams & upload
+        env:
+          GH_TOKEN:        ${{ secrets.GH_PAT }}         # 脚本里当 GH_TOKEN 用
+          UPSTREAM_REPOS:  ${{ env.UPSTREAM_REPOS }}
+          TRACKER_DIR:     ${{ env.TRACKER_DIR }}
+          NETDISK_PREFIX:  ${{ env.NETDISK_PREFIX }}
+          NETDISK_APPEND_TAG: ${{ env.NETDISK_APPEND_TAG }}
+          REPO_ALIASES:    ${{ env.REPO_ALIASES }}
+          NAMESPACE_RELEASE_TAGS: ${{ env.NAMESPACE_RELEASE_TAGS }}
+          BAIDU_COOKIE:    ${{ secrets.BAIDU_COOKIE }}   # 包含 BDUSS=...
+        run: python .github/scripts/sync_release_multi.py
