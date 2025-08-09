@@ -11,6 +11,10 @@
     "ROCKNIX/distribution": {
       "last_tag": "20250517",
       "checked_at": "2025-08-09T16:00:18.925677+00:00"
+    },
+    "knulli-cfw/distribution": {
+      "last_tag": "20250505",
+      "checked_at": "2025-08-09T18:06:17.762070+00:00"
     }
   }
 }
