@@ -97,34 +97,49 @@ def extract_bduss(cookie: str) -> str:
     return m.group(1) if m else ""
 
 def upload_to_baidunetdisk(local_dir, netdisk_prefix, cookie):
+    import pathlib, re, subprocess
+
+    def extract_bduss(cookie: str) -> str:
+        m = re.search(r"BDUSS=([^;]+)", cookie or "")
+        return m.group(1) if m else ""
+
     bduss = extract_bduss(cookie)
     if not bduss:
         print("未找到 BDUSS（请在 BAIDU_COOKIE 中包含 BDUSS=...;），跳过百度网盘上传。")
         return False
-    # 目录必须以 / 开头
-    netdisk_prefix = netdisk_prefix.strip()
-    if not netdisk_prefix.startswith("/"):
-        netdisk_prefix = "/" + netdisk_prefix
+
+    # 远端目录例如：/lcdyk有的掌机/release-portmaster/2025.07.14-1510
+    netdisk_prefix = netdisk_prefix if netdisk_prefix.startswith("/") else "/" + netdisk_prefix
 
     # 登录
-    print("BaiduPCS-Go 登录中...")
     subprocess.run(["BaiduPCS-Go", "logout"], check=False)
     subprocess.run(["BaiduPCS-Go", "login", f"-bduss={bduss}"], check=True)
 
-    # 创建目录并上传
-    print("创建/检查远程目录：", netdisk_prefix)
+    # 确保远端目录存在
     subprocess.run(["BaiduPCS-Go", "mkdir", netdisk_prefix], check=False)
 
-    print("上传目录到百度网盘：", local_dir, "->", netdisk_prefix)
-    # 直接把整个目录上传到指定前缀
-    # 说明：BaiduPCS-Go upload <本地路径> <远端目录>
-    up = subprocess.run(
-        ["BaiduPCS-Go", "upload", local_dir, netdisk_prefix, "-retry", "3"],
-        check=False
-    )
-    if up.returncode != 0:
-        raise RuntimeError("BaiduPCS-Go 上传失败")
-    return True
+    # 只上传“目录里的文件”，不连同最外层目录名
+    local_path = pathlib.Path(local_dir)
+    uploaded_any = False
+    for p in local_path.iterdir():
+        # 根目录我们只放文件；若你以后放子目录，也按同名子目录创建后再传
+        if p.is_file():
+            cmd = ["BaiduPCS-Go", "upload", str(p), netdisk_prefix, "-retry", "3"]
+            print("上传文件：", " ".join(cmd))
+            subprocess.run(cmd, check=True)
+            uploaded_any = True
+        elif p.is_dir():
+            # 若出现子目录，则把它的内容传到 远端/<子目录名>/ 下
+            remote_sub = netdisk_prefix.rstrip("/") + "/" + p.name
+            subprocess.run(["BaiduPCS-Go", "mkdir", remote_sub], check=False)
+            cmd = ["BaiduPCS-Go", "upload", str(p), remote_sub, "-retry", "3"]
+            print("上传子目录：", " ".join(cmd))
+            subprocess.run(cmd, check=True)
+            uploaded_any = True
+
+    if not uploaded_any:
+        print("本地待上传目录为空。")
+    return uploaded_any
 
 def main():
     upstream = os.environ["UPSTREAM_REPO"]

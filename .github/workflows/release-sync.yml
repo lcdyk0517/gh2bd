@@ -17,7 +17,7 @@ env:
   TRACKER_BRANCH: release-tracker
   TRACKER_DIR: .release-tracker
   # 网盘上传的根目录前缀（会自动在其下加 /<tag>）
-  NETDISK_PREFIX: /lcdyk有的掌机/release-portmaster/${{ github.repository }}
+  NETDISK_PREFIX: /lcdyk有的掌机/release-portmaster
 
 jobs:
   sync:
