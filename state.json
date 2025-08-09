@@ -3,6 +3,10 @@
     "PortsMaster/PortMaster-GUI": {
       "last_tag": "2025.07.14-1510",
       "checked_at": "2025-08-09T07:21:39.229356+00:00"
+    },
+    "retroGFX/UnofficialOS": {
+      "last_tag": "20250802",
+      "checked_at": "2025-08-09T11:29:14.925057+00:00"
     }
   }
 }
