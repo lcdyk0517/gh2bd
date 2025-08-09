@@ -15,6 +15,10 @@
     "knulli-cfw/distribution": {
       "last_tag": "20250505",
       "checked_at": "2025-08-09T18:06:17.762070+00:00"
+    },
+    "AmberELEC/AmberELEC-prerelease": {
+      "last_tag": "prerelease-20250515_1801",
+      "checked_at": "2025-08-09T18:23:21.877370+00:00"
     }
   }
 }
