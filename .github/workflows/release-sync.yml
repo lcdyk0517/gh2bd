@@ -1,8 +1,8 @@
-name: Sync upstream releases → mirror here → upload to Baidu Netdisk
+name: 同步portmaster
 
 on:
   schedule:
-    - cron: "0 * * * *"   # 每小时跑一次，按需改
+    - cron: "0 3 * * 1"   # 每周一 03:00 UTC（每7天一次）
   workflow_dispatch: {}
 
 permissions:
@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UPSTREAM_REPO: owner/repo            # ← 改成你的上游仓库
+  UPSTREAM_REPO: PortsMaster/PortMaster-GUI          # ← 改成你的上游仓库
   TRACKER_BRANCH: release-tracker
   TRACKER_DIR: .release-tracker
   # 网盘上传的根目录前缀（会自动在其下加 /<tag>）
