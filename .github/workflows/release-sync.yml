@@ -1,0 +1,85 @@
+name: Sync upstream releases → mirror here → upload to Baidu Netdisk
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # 每小时跑一次，按需改
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: owner/repo            # ← 改成你的上游仓库
+  TRACKER_BRANCH: release-tracker
+  TRACKER_DIR: .release-tracker
+  # 网盘上传的根目录前缀（会自动在其下加 /<tag>）
+  NETDISK_PREFIX: /lcdyk有的掌机/release-portmaster/${{ github.repository }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}   # 用你的 PAT，便于推送 tracker 分支
+
+      - name: Prepare tracker worktree
+        run: |
+          set -eux
+          git fetch origin || true
+          if git ls-remote --exit-code --heads origin "$TRACKER_BRANCH" >/dev/null 2>&1; then
+            git branch -f "$TRACKER_BRANCH" "origin/$TRACKER_BRANCH"
+            git worktree add "$TRACKER_DIR" "$TRACKER_BRANCH"
+          else
+            git worktree add -b "$TRACKER_BRANCH" "$TRACKER_DIR"
+            echo '{}' > "$TRACKER_DIR/state.json"
+            pushd "$TRACKER_DIR"
+            git add state.json
+            git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" commit -m "init tracker"
+            git push -u origin "$TRACKER_BRANCH"
+            popd
+          fi
+
+      - name: Install Python deps
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+
+      - name: Install BaiduPCS-Go
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y jq unzip golang-go
+          API="https://api.github.com/repos/qjfoidnh/BaiduPCS-Go/releases/latest"
+          URL=$(curl -s "$API" | jq -r '.assets[] | select(.name|test("linux.*amd64|linux.*x86_64|linux_amd64")) | .browser_download_url' | head -n1 || true)
+          if [ -n "$URL" ]; then
+            curl -L "$URL" -o /tmp/pcs.zip
+            unzip -j /tmp/pcs.zip -d /tmp || true
+            # 有的版本解压后叫 BaiduPCS-Go，有的在子目录里，兜底找一下
+            PCS=$(find /tmp -maxdepth 2 -type f -name BaiduPCS-Go | head -n1)
+            sudo mv "$PCS" /usr/local/bin/BaiduPCS-Go
+          else
+            # 兜底：从源码安装
+            GOPATH="$HOME/go"
+            mkdir -p "$GOPATH"
+            go install github.com/qjfoidnh/BaiduPCS-Go@latest
+            sudo ln -sf "$HOME/go/bin/BaiduPCS-Go" /usr/local/bin/BaiduPCS-Go
+          fi
+          sudo chmod +x /usr/local/bin/BaiduPCS-Go
+          BaiduPCS-Go -v
+
+      - name: Sync release & upload to Baidu Netdisk
+        env:
+          # 用你的 PAT 作为脚本 GH_TOKEN
+          GH_TOKEN:        ${{ secrets.GH_PAT }}
+          UPSTREAM_REPO:   ${{ env.UPSTREAM_REPO }}
+          TRACKER_DIR:     ${{ env.TRACKER_DIR }}
+          NETDISK_PREFIX:  ${{ env.NETDISK_PREFIX }}
+          BAIDU_COOKIE:    ${{ secrets.BAIDU_COOKIE }}
+        run: python .github/scripts/sync_release.py
