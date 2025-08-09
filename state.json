@@ -1,1 +1,8 @@
-{"repos":{}}
+{
+  "repos": {
+    "PortsMaster/PortMaster-GUI": {
+      "last_tag": "2025.07.14-1510",
+      "checked_at": "2025-08-09T07:21:39.229356+00:00"
+    }
+  }
+}
