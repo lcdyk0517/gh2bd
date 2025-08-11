@@ -1,0 +1,121 @@
+name: cleanup-gh-usage
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: 'GitHub username (owner)'
+        required: true
+        default: 'lcdyk0517'
+      execute:
+        description: 'Actually delete? (false = dry-run)'
+        required: true
+        default: 'false'
+      skip_artifacts:
+        description: 'Skip deleting Actions artifacts'
+        required: true
+        default: 'false'
+      skip_packages:
+        description: 'Skip deleting GitHub Packages'
+        required: true
+        default: 'false'
+      delete_package_shell:
+        description: 'Also delete package shell after deleting all versions'
+        required: true
+        default: 'true'
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}   # gh CLI 会自动使用这个 token
+    steps:
+      - name: Ensure jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+      - name: Run cleanup (dry-run or execute)
+        env:
+          OWNER: ${{ inputs.owner }}
+          EXECUTE: ${{ inputs.execute }}
+          SKIP_ARTIFACTS: ${{ inputs.skip_artifacts }}
+          SKIP_PACKAGES: ${{ inputs.skip_packages }}
+          DELETE_PACKAGE_SHELL: ${{ inputs.delete_package_shell }}
+        run: |
+          set -euo pipefail
+          DRY_RUN=true
+          [[ "$EXECUTE" == "true" ]] && DRY_RUN=false
+          echo "Owner=$OWNER  DryRun=$DRY_RUN  SkipArtifacts=$SKIP_ARTIFACTS  SkipPackages=$SKIP_PACKAGES  DeletePackageShell=$DELETE_PACKAGE_SHELL"
+
+          urlencode() { jq -rn --arg v "$1" '$v|@uri'; }
+
+          delete_artifacts() {
+            echo "==> Deleting Actions artifacts for all repos under $OWNER"
+            gh repo list "$OWNER" --limit 1000 --json nameWithOwner -q '.[].nameWithOwner' | while read -r REPO; do
+              [[ -z "$REPO" ]] && continue
+              echo "Repo: $REPO"
+              page=1
+              while :; do
+                RESP="$(gh api -H "Accept: application/vnd.github+json" "/repos/$REPO/actions/artifacts?per_page=100&page=$page")"
+                IDS="$(echo "$RESP" | jq -r '.artifacts[].id')"
+                [[ -z "$IDS" ]] && break
+                while read -r ID; do
+                  [[ -z "$ID" ]] && continue
+                  if $DRY_RUN; then
+                    echo "  [dry-run] would delete artifact id=$ID"
+                  else
+                    echo "  deleting artifact id=$ID"
+                    gh api --method DELETE "/repos/$REPO/actions/artifacts/$ID" >/dev/null
+                  fi
+                done <<< "$IDS"
+                ((page++))
+              done
+            done
+          }
+
+          delete_packages() {
+            echo "==> Deleting Packages for user $OWNER"
+            for TYPE in container npm maven rubygems nuget; do
+              echo "Type: $TYPE"
+              page=1
+              while :; do
+                PKGS="$(gh api -H "Accept: application/vnd.github+json" "/user/packages?package_type=$TYPE&per_page=100&page=$page" | jq -r '.[].name')"
+                [[ -z "$PKGS" ]] && break
+                while read -r NAME; do
+                  [[ -z "$NAME" ]] && continue
+                  ENC_NAME="$(urlencode "$NAME")"
+                  echo "  Package: $TYPE/$NAME"
+                  vpage=1
+                  while :; do
+                    VERS="$(gh api -H "Accept: application/vnd.github+json" "/user/packages/$TYPE/$ENC_NAME/versions?per_page=100&page=$vpage" | jq -r '.[].id')"
+                    [[ -z "$VERS" ]] && break
+                    while read -r VID; do
+                      [[ -z "$VID" ]] && continue
+                      if $DRY_RUN; then
+                        echo "    [dry-run] would delete version id=$VID"
+                      else
+                        echo "    deleting version id=$VID"
+                        gh api --method DELETE "/user/packages/$TYPE/$ENC_NAME/versions/$VID" >/dev/null
+                      fi
+                    done <<< "$VERS"
+                    ((vpage++))
+                  done
+                  if [[ "$DELETE_PACKAGE_SHELL" == "true" ]]; then
+                    if $DRY_RUN; then
+                      echo "    [dry-run] would delete package shell"
+                    else
+                      echo "    deleting package shell"
+                      gh api --method DELETE "/user/packages/$TYPE/$ENC_NAME" >/dev/null || true
+                    fi
+                  fi
+                done <<< "$PKGS"
+                ((page++))
+              done
+            done
+          }
+
+          [[ "$SKIP_ARTIFACTS" == "true" ]] || delete_artifacts
+          [[ "$SKIP_PACKAGES" == "true" ]] || delete_packages
+
+          echo "All done. Usage will refresh in the next 6–12 hours."
