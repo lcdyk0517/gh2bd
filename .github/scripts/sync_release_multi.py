@@ -170,8 +170,9 @@ def process_one(upstream, tracker_dir, netdisk_prefix, append_tag, aliases, name
     local_release_name = f"[{folder_for_repo(upstream, aliases)}] {name}"
 
     # 远端网盘目录：/前缀/<别名>[/<tag>]
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d")
     alias_folder = folder_for_repo(upstream, aliases)
-    remote_dir = f"{netdisk_prefix.rstrip('/')}/{alias_folder}"
+    remote_dir = f"{netdisk_prefix.rstrip('/')}/{alias_folder}/{date_str}"
     if append_tag:
         remote_dir = f"{remote_dir}/{upstream_tag}"
 
